@@ -1,91 +1,184 @@
 """
-db/database.py
+scan_engine.py
 
-Sets up the SQLAlchemy database engine and session factory.
-
-Think of it like this:
-- Engine = the connection to the database file
-- Session = a temporary workspace where you make changes
-           (like a shopping cart — you add items, then checkout/commit)
-- Base = the parent class all our database models inherit from
+Main pipeline — wired to use the existing SQLAlchemy
+models and queries your friend built on Day 1-2.
 """
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
-from core.config import settings
-
-# ─────────────────────────────────────────────
-# DATABASE URL
-# ─────────────────────────────────────────────
-
-# SQLite stores everything in a single file.
-# "sqlite:///shieldlabs.db" means:
-# - sqlite:// = use SQLite
-# - ///shieldlabs.db = file named shieldlabs.db in current directory
-DATABASE_URL = "sqlite:///shieldlabs.db"
-
-
-# ─────────────────────────────────────────────
-# ENGINE
-# ─────────────────────────────────────────────
-
-# The engine is the actual connection to the database.
-# connect_args={"check_same_thread": False} is required for SQLite
-# when used with FastAPI because FastAPI handles multiple requests
-# on different threads, and SQLite needs this flag to allow that.
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    echo=settings.debug  # If DEBUG=True, prints every SQL query (great for learning)
+import logging
+from db.database import SessionLocal, engine, Base
+from db.models import ScanStatus
+from db import queries
+from scanners.pattern_detector import scan_file_for_patterns
+from scanners.semantic_analyzer import filter_findings_with_llm
+from scanners.fix_generator import generate_fixes_for_all
+from utils.repo_handler import (
+    download_github_repo, get_all_code_files,
+    cleanup_temp_repo
 )
 
-
-# ─────────────────────────────────────────────
-# SESSION FACTORY
-# ─────────────────────────────────────────────
-
-# SessionLocal is a factory — calling SessionLocal() creates a new session.
-# autocommit=False → we manually commit changes (safer, gives us control)
-# autoflush=False  → don't auto-send changes to DB until we commit
-SessionLocal = sessionmaker(
-    bind=engine,
-    autocommit=False,
-    autoflush=False
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("shieldlabs.engine")
 
 
-# ─────────────────────────────────────────────
-# BASE CLASS
-# ─────────────────────────────────────────────
-
-# All our database models (tables) will inherit from this Base class.
-# SQLAlchemy uses it to track all models and create tables.
-class Base(DeclarativeBase):
-    pass
+def _init_db():
+    """Creates tables if they don't exist yet."""
+    Base.metadata.create_all(bind=engine)
 
 
-# ─────────────────────────────────────────────
-# DEPENDENCY — Used by FastAPI
-# ─────────────────────────────────────────────
+def _confidence_to_severity(confidence: float) -> str:
+    """Maps our 0.0-1.0 confidence score to severity levels."""
+    if confidence >= 0.9:
+        return "critical"
+    elif confidence >= 0.75:
+        return "high"
+    elif confidence >= 0.5:
+        return "medium"
+    else:
+        return "low"
 
-def get_db():
-    """
-    FastAPI dependency that provides a database session.
 
-    This is a generator function (uses yield instead of return).
-    FastAPI calls this automatically for every request that needs DB access.
-
-    The try/finally pattern guarantees the session is always closed
-    even if an error occurs during the request. This prevents
-    connection leaks.
-
-    Usage in FastAPI:
-        @app.get("/scans")
-        def get_scans(db: Session = Depends(get_db)):
-            ...
-    """
+def scan_local_file(file_path: str) -> dict:
+    """Scan a single local file end-to-end."""
+    _init_db()
     db = SessionLocal()
+
     try:
-        yield db        # Hand the session to the route handler
+        # Create scan record
+        scan = queries.create_scan(db, target=file_path, scan_type="code")
+        queries.update_scan_status(db, scan.id, ScanStatus.RUNNING)
+
+        # Read file
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            source = f.read()
+
+        # Run pipeline
+        findings = scan_file_for_patterns(file_path, source)
+        reviewed = filter_findings_with_llm(findings)
+        fixed = generate_fixes_for_all(reviewed)
+
+        # Save each finding
+        for f in fixed:
+            queries.add_finding(
+                db,
+                scan_id=scan.id,
+                vuln_type=f.get("vuln_type", "Unknown"),
+                severity=_confidence_to_severity(f.get("confidence", 0.5)),
+                description=f.get("reason", ""),
+                file_path=f.get("file"),
+                line_number=f.get("line"),
+                vulnerable_code=f.get("code_snippet"),
+                ai_explanation=f.get("llm_explanation"),
+                ai_fix=f.get("fix_code"),
+            )
+
+        # Mark complete
+        queries.update_scan_findings_count(db, scan.id)
+        queries.update_scan_status(db, scan.id, ScanStatus.COMPLETED)
+
+        # Return result
+        scan = queries.get_scan(db, scan.id)
+        findings_out = queries.get_findings_by_scan(db, scan.id)
+
+        return {
+            "scan": {
+                "id": scan.id,
+                "target": scan.target,
+                "status": scan.status,
+                "total_findings": scan.total_findings,
+                "created_at": str(scan.created_at),
+            },
+            "findings": [
+                {
+                    "vuln_type": f.vuln_type,
+                    "severity": f.severity,
+                    "file": f.file_path,
+                    "line": f.line_number,
+                    "code": f.vulnerable_code,
+                    "explanation": f.ai_explanation,
+                    "fix": f.ai_fix,
+                }
+                for f in findings_out
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Scan failed: {e}")
+        queries.update_scan_status(db, scan.id, ScanStatus.FAILED, str(e))
+        raise
+
     finally:
-        db.close()      # Always close, no matter what
+        db.close()
+
+
+def scan_github_repo(url: str) -> dict:
+    """Clone a GitHub repo and scan all code files."""
+    _init_db()
+    db = SessionLocal()
+    repo_path = None
+
+    try:
+        scan = queries.create_scan(db, target=url, scan_type="code")
+        queries.update_scan_status(db, scan.id, ScanStatus.RUNNING)
+
+        repo_path = download_github_repo(url)
+        files = get_all_code_files(repo_path)
+
+        all_findings = []
+        for file_path in files:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                source = f.read()
+            findings = scan_file_for_patterns(file_path, source)
+            all_findings.extend(findings)
+
+        reviewed = filter_findings_with_llm(all_findings)
+        fixed = generate_fixes_for_all(reviewed)
+
+        for f in fixed:
+            queries.add_finding(
+                db,
+                scan_id=scan.id,
+                vuln_type=f.get("vuln_type", "Unknown"),
+                severity=_confidence_to_severity(f.get("confidence", 0.5)),
+                description=f.get("reason", ""),
+                file_path=f.get("file"),
+                line_number=f.get("line"),
+                vulnerable_code=f.get("code_snippet"),
+                ai_explanation=f.get("llm_explanation"),
+                ai_fix=f.get("fix_code"),
+            )
+
+        queries.update_scan_findings_count(db, scan.id)
+        queries.update_scan_status(db, scan.id, ScanStatus.COMPLETED)
+
+        scan = queries.get_scan(db, scan.id)
+        findings_out = queries.get_findings_by_scan(db, scan.id)
+
+        return {
+            "scan": {
+                "id": scan.id,
+                "target": scan.target,
+                "status": scan.status,
+                "total_findings": scan.total_findings,
+            },
+            "findings": [
+                {
+                    "vuln_type": f.vuln_type,
+                    "severity": f.severity,
+                    "file": f.file_path,
+                    "line": f.line_number,
+                    "fix": f.ai_fix,
+                }
+                for f in findings_out
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Scan failed: {e}")
+        queries.update_scan_status(db, scan.id, ScanStatus.FAILED, str(e))
+        raise
+
+    finally:
+        if repo_path:
+            cleanup_temp_repo(repo_path)
+        db.close()
