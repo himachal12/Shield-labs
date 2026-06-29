@@ -1,60 +1,36 @@
-"""
-ShieldLabs Main Application
-FastAPI entry point for the security scanning platform
-"""
+"""ShieldLabs FastAPI application."""
 
 import logging
-import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
+from fastapi.responses import JSONResponse
 
-# Load environment variables from .env file
-load_dotenv()
-
-# Import API routes
 from app.api.routes import router
+from app.config import settings
+from app.models.database import init_db
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("shieldlabs.main")
 
-# Get config from .env
-APP_NAME = os.getenv("APP_NAME", "ShieldLabs")
-APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
-DEBUG = os.getenv("DEBUG", "True") == "True"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifecycle manager for FastAPI
-    Runs on startup and shutdown
-    """
-    # On startup
-    logger.info(f"🛡️  {APP_NAME} v{APP_VERSION} starting up...")
-    logger.info(f"🔧 Debug mode: {DEBUG}")
-    logger.info(f"🧠 Ollama API: {os.getenv('OLLAMA_BASE_URL')}")
-    logger.info(f"🚀 Groq API: {'Configured' if os.getenv('GROQ_API_KEY') else 'NOT CONFIGURED'}")
-    
-    yield  # App runs here
-    
-    # On shutdown
-    logger.info(f"🛑 {APP_NAME} shutting down...")
+    init_db()
+    logger.info("%s v%s started", settings.app_name, settings.app_version)
+    yield
+    logger.info("%s stopped", settings.app_name)
 
-# Create FastAPI app
+
 app = FastAPI(
-    title=APP_NAME,
+    title=settings.app_name,
     description="AI-powered security scanner and vulnerability remediation engine",
-    version=APP_VERSION,
-    debug=DEBUG,
-    lifespan=lifespan
+    version=settings.app_version,
+    debug=settings.debug,
+    lifespan=lifespan,
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -63,51 +39,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include all routes
 app.include_router(router)
 
-# Health check endpoint
+
 @app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "message": f"Welcome to {APP_NAME}",
-        "version": APP_VERSION,
-        "status": "running"
-    }
+def root():
+    return {"name": settings.app_name, "version": settings.app_version, "status": "running", "docs": "/docs"}
+
 
 @app.get("/api/health")
-async def health():
-    """Health check endpoint"""
+def health():
     return {
         "status": "ok",
-        "app": APP_NAME,
-        "version": APP_VERSION,
-        "debug": DEBUG,
-        "services": {
-            "api": "operational",
-            "database": "operational",
-            "ollama": "not_checked_yet",
-            "groq": "not_checked_yet"
-        }
+        "app": settings.app_name,
+        "version": settings.app_version,
+        "debug": settings.debug,
+        "services": {"api": "operational", "database": "operational", "ollama": "not_checked", "groq": "configured" if settings.groq_api_key else "not_configured"},
     }
 
-# Error handlers
+
 @app.exception_handler(Exception)
-async def general_exception_handler(request, exc):
-    """Handle all exceptions"""
-    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
-    return {
-        "error": "Internal server error",
-        "detail": str(exc) if DEBUG else "An error occurred"
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+async def general_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception")
+    return JSONResponse(status_code=500, content={"error": "Internal server error", "detail": str(exc) if settings.debug else "An error occurred"})

@@ -1,49 +1,23 @@
-"""
-Base Agent class for CrewAI
-All agents inherit from this
-"""
+"""Base agent abstraction used by ShieldLabs analysis agents."""
 
-from crewai import Agent, Task
-from typing import Optional
+from typing import Any
+
+try:
+    from crewai import Agent
+except ImportError:
+    Agent = None
+
 
 class ShieldLabsAgent:
-    """
-    Base agent for ShieldLabs
-    Wraps CrewAI Agent with custom functionality
-    """
-    
-    def __init__(
-        self,
-        name: str,
-        role: str,
-        goal: str,
-        backstory: str,
-        llm=None
-    ):
-        """
-        Initialize agent
-        
-        Args:
-            name: Agent name
-            role: Agent's role (e.g., "Code Security Expert")
-            goal: What agent aims to do
-            backstory: Agent's background/expertise
-            llm: Language model instance
-        """
+    def __init__(self, name: str, role: str, goal: str, backstory: str, llm: Any = None):
         self.name = name
         self.role = role
         self.goal = goal
         self.backstory = backstory
         self.llm = llm
-        
-        # Create CrewAI agent
-        self.agent = Agent(
-            role=role,
-            goal=goal,
-            backstory=backstory,
-            llm=llm,
-            verbose=True
-        )
-    
-    def __repr__(self):
+        self.agent = None
+        if Agent is not None:
+            self.agent = Agent(role=role, goal=goal, backstory=backstory, llm=llm, verbose=True)
+
+    def __repr__(self) -> str:
         return f"<ShieldLabsAgent {self.name}>"
