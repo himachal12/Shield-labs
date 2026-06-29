@@ -119,9 +119,9 @@ def _ask_ollama(prompt: str, max_tokens: int = 1024) -> str:
             json={
                 "model": settings.ollama_model,
                 "prompt": prompt,
-                "stream": False,        # Get full response at once, not word by word
+                "stream": False,        #  Get full response at once, not word by word
                 "options": {
-                    "num_predict": max_tokens,  # Ollama's name for max_tokens
+                    "num_predict": max_tokens,  #  Ollama's name for max_tokens
                     "temperature": 0.3,
                 }
             }
