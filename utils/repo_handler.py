@@ -7,8 +7,9 @@ Handles getting source code onto local disk so we can scan it:
 - Finding all scannable code files inside
 - Cleaning up temp folders when we're done
 
-Everything goes into the system's temp directory (e.g. C:\Users\you\AppData\Local\Temp
-on Windows) under a unique folder name per scan, so multiple scans never collide.
+Everything goes into the OS temp directory (on Windows this is typically
+under AppData/Local/Temp) under a unique folder name per scan, so multiple
+scans never collide.
 """
 
 import os
@@ -112,7 +113,7 @@ def download_github_repo(url: str, branch: str = "main") -> str:
     clone_url = _normalize_github_url(url)
 
     # tempfile.mkdtemp() creates a unique folder so concurrent scans
-    # never overwrite each other. prefix makes it easy to spot in /tmp.
+    # never overwrite each other. prefix makes it easy to spot in the temp dir.
     dest_path = tempfile.mkdtemp(prefix="shieldlabs_repo_")
 
     logger.info(f"Cloning {clone_url} (branch={branch}) into {dest_path}")
