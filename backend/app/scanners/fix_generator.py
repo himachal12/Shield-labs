@@ -25,17 +25,25 @@ logger = logging.getLogger("shieldlabs.fix_generator")
 
 VALID_RISK_LEVELS = {"low", "medium", "high"}
 
+
 def _build_prompt(finding: dict) -> str:
     """Builds the prompt asking the LLM for a structured fix."""
     code = finding.get("code_snippet") or finding.get("vulnerable_code") or ""
     vuln_type = finding.get("vuln_type", "Unknown vulnerability")
     file_path = finding.get("file") or finding.get("file_path") or "unknown file"
 
-    return f"""You are a senior application security engineer. Fix this vulnerability.
-
-Vulnerability type: {vuln_type}
-File: {file_path}
-Vulnerable code:
+    prompt = "You are a senior application security engineer. Fix this vulnerability.\n\n"
+    prompt += "Vulnerability type: " + vuln_type + "\n"
+    prompt += "File: " + file_path + "\n"
+    prompt += "Vulnerable code:\n```\n" + code + "\n```\n\n"
+    prompt += "Respond with ONLY a JSON object (no markdown fences, no extra text) in this exact shape:\n"
+    prompt += '{\n'
+    prompt += '  "patched_code": "the corrected code, same language, minimal change",\n'
+    prompt += '  "explanation": "2-4 sentences explaining the fix",\n'
+    prompt += '  "confidence": 0.0 to 1.0 (how confident you are this fix is correct and complete),\n'
+    prompt += '  "breaking_change_risk": "Low" or "Medium" or "High" (chance this fix changes behavior)\n'
+    prompt += '}\n'
+    return prompt
 
 
 def _parse_llm_json(raw: str) -> Optional[dict]:
@@ -67,8 +75,8 @@ def _make_unified_diff(original: str, patched: str, file_path: str) -> str:
     diff = difflib.unified_diff(
         original_lines,
         patched_lines,
-        fromfile=f"a/{file_path}",
-        tofile=f"b/{file_path}",
+        fromfile="a/" + file_path,
+        tofile="b/" + file_path,
         lineterm="",
     )
     return "\n".join(diff)
@@ -87,7 +95,7 @@ def generate_fix(finding: dict) -> dict:
         The same finding dict, merged with:
             fixed_code, fix_explanation, unified_diff,
             fix_confidence, breaking_change_risk
-        On failure, these keys are set to None and an "fix_error" key is added.
+        On failure, these keys are set to None and a "fix_error" key is added.
     """
     original_code = finding.get("code_snippet") or finding.get("vulnerable_code") or ""
     file_path = finding.get("file") or finding.get("file_path") or "unknown"
@@ -96,7 +104,7 @@ def generate_fix(finding: dict) -> dict:
     result = ask_llm(prompt, max_tokens=1024, prefer_local=True)
 
     if not result.get("success"):
-        logger.error(f"Fix generation failed for {finding.get('vuln_type')}: {result.get('error')}")
+        logger.error("Fix generation failed for " + str(finding.get("vuln_type")) + ": " + str(result.get("error")))
         return {
             **finding,
             "fixed_code": None,
@@ -109,7 +117,7 @@ def generate_fix(finding: dict) -> dict:
 
     parsed = _parse_llm_json(result["response"])
     if not parsed:
-        logger.warning(f"Could not parse fix JSON for {finding.get('vuln_type')}; raw response kept as explanation.")
+        logger.warning("Could not parse fix JSON for " + str(finding.get("vuln_type")) + "; raw response kept as explanation.")
         return {
             **finding,
             "fixed_code": None,
@@ -151,8 +159,8 @@ def generate_fixes_for_all(findings: list[dict]) -> list[dict]:
     Returns:
         Same list, each item enriched with fix fields.
     """
-    logger.info(f"Generating fixes for {len(findings)} findings...")
+    logger.info("Generating fixes for " + str(len(findings)) + " findings...")
     enriched = [generate_fix(f) for f in findings]
     succeeded = sum(1 for f in enriched if f.get("fixed_code"))
-    logger.info(f"Fix generation complete: {succeeded}/{len(findings)} succeeded.")
+    logger.info("Fix generation complete: " + str(succeeded) + "/" + str(len(findings)) + " succeeded.")
     return enriched
