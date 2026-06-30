@@ -81,7 +81,7 @@ def check_security_headers(target: str) -> list[dict]:
             "vuln_type": "Unreachable Target",
             "url": url,
             "confidence": 1.0,
-            "reason": f"Could not connect to {url}: {exc}",
+            "reason": "Could not connect to " + url + ": " + str(exc),
         }]
 
     present_headers = {h.lower() for h in response.headers.keys()}
