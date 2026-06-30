@@ -38,7 +38,7 @@ def _save_pipeline_findings(db, scan, findings: list[dict]) -> None:
             db=db,
             scan_id=scan.scan_id,
             vuln_type=item.get("vuln_type", "Unknown"),
-            severity=_confidence_to_severity(item.get("confidence", 0.5)),
+            severity=item.get("severity_hint") or _confidence_to_severity(item.get("confidence", 0.5)),,
             description=item.get("reason", "Security finding"),
             file_path=item.get("file"),
             line_number=item.get("line"),
