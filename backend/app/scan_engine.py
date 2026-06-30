@@ -43,8 +43,10 @@ def _save_pipeline_findings(db, scan, findings: list[dict]) -> None:
             line_number=item.get("line"),
             vulnerable_code=item.get("code_snippet"),
             ai_explanation=item.get("fix_explanation") or item.get("llm_explanation"),
-            ai_fix=item.get("fix_code"),
+            ai_fix=item.get("fixed_code"),
             confidence=item.get("confidence", 1.0),
+            unified_diff=item.get("unified_diff"),
+            breaking_change_risk=item.get("breaking_change_risk"),
         )
 
 
