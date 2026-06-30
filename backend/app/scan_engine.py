@@ -5,6 +5,7 @@ import logging
 from app.models import repository
 from app.models.database import SessionLocal, init_db
 from app.models.entities import ScanStatus
+from app.scanners.web_scanner import run_web_recon
 from app.scanners.fix_generator import generate_fixes_for_all
 from app.scanners.pattern_detector import scan_file_for_patterns
 from app.scanners.semantic_analyzer import filter_findings_with_llm
@@ -110,11 +111,22 @@ def scan_github_repo(url: str, scan_id: str | None = None) -> dict:
 def scan_web_domain(domain: str, scan_id: str | None = None) -> dict:
     init_db()
     db = SessionLocal()
+    scan = None
     try:
         scan = _get_or_create_scan(db, scan_id, domain, "web", domain=domain)
-        repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=25, stage="Preparing web scan")
+        repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=25, stage="Running web reconnaissance")
+        findings = run_web_recon(domain)
+        repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=70, stage="Reviewing findings")
+        reviewed = filter_findings_with_llm(findings)
+        fixed = generate_fixes_for_all(reviewed)
+        _save_pipeline_findings(db, scan, fixed)
         repository.update_scan_status(db, scan.scan_id, ScanStatus.COMPLETED.value, progress=100, stage="Completed")
         return format_scan_result(db, scan.scan_id)
+    except Exception as exc:
+        logger.exception("Web domain scan failed")
+        if scan:
+            repository.update_scan_status(db, scan.scan_id, ScanStatus.FAILED.value, str(exc), progress=100, stage="Failed")
+        raise
     finally:
         db.close()
 
