@@ -25,25 +25,17 @@ logger = logging.getLogger("shieldlabs.fix_generator")
 
 VALID_RISK_LEVELS = {"low", "medium", "high"}
 
-
 def _build_prompt(finding: dict) -> str:
     """Builds the prompt asking the LLM for a structured fix."""
     code = finding.get("code_snippet") or finding.get("vulnerable_code") or ""
     vuln_type = finding.get("vuln_type", "Unknown vulnerability")
     file_path = finding.get("file") or finding.get("file_path") or "unknown file"
 
-   return f"""You are a senior application security engineer. Fix this vulnerability.
+    return f"""You are a senior application security engineer. Fix this vulnerability.
 
 Vulnerability type: {vuln_type}
 File: {file_path}
 Vulnerable code:
-{{
-  "patched_code": "the corrected code, same language, minimal change",
-  "explanation": "2-4 sentences explaining the fix",
-  "confidence": 0.0 to 1.0 (how confident you are this fix is correct and complete),
-  "breaking_change_risk": "Low" or "Medium" or "High" (chance this fix changes behavior)
-}}
-"""
 
 
 def _parse_llm_json(raw: str) -> Optional[dict]:
