@@ -9,7 +9,8 @@ Pure HTTP-based checks (no external tools required):
 - Basic technology fingerprinting
 
 Each check returns finding dicts shaped like pattern_detector's output
-so they can flow through the same semantic_analyzer / fix_generator
+(including a "line" key, even though it's None for web findings) so
+they can flow through the same semantic_analyzer / fix_generator
 pipeline used for code findings.
 """
 
@@ -80,6 +81,7 @@ def check_security_headers(target: str) -> list[dict]:
         return [{
             "vuln_type": "Unreachable Target",
             "url": url,
+            "line": None,
             "confidence": 1.0,
             "reason": "Could not connect to " + url + ": " + str(exc),
         }]
@@ -91,6 +93,7 @@ def check_security_headers(target: str) -> list[dict]:
             findings.append({
                 "vuln_type": "Missing Security Header: " + header_name,
                 "url": url,
+                "line": None,
                 "confidence": 0.9,
                 "reason": meta["reason"],
                 "severity_hint": meta["severity"],
@@ -101,6 +104,7 @@ def check_security_headers(target: str) -> list[dict]:
         findings.append({
             "vuln_type": "Server Header Disclosure",
             "url": url,
+            "line": None,
             "confidence": 0.5,
             "reason": "Server header reveals software/version (" + server_header + "), aiding attacker reconnaissance.",
             "severity_hint": "low",
@@ -132,6 +136,7 @@ def check_exposed_files(target: str) -> list[dict]:
             findings.append({
                 "vuln_type": "Exposed Sensitive File",
                 "url": full_url,
+                "line": None,
                 "confidence": 0.85,
                 "reason": reason,
                 "severity_hint": "critical",
