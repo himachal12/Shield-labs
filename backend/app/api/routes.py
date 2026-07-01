@@ -2,6 +2,8 @@
 
 import logging
 
+from fastapi.responses import FileResponse
+from app.scan_engine import generate_report
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -153,6 +155,23 @@ def get_scan_status(scan_id: str, db: Session = Depends(get_db)):
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     return {"scan_id": scan.scan_id, "status": scan.status, "progress": scan.progress, "current_stage": scan.current_stage, "total_findings": scan.total_findings}
+
+@scan_router.get("/report/{scan_id}")
+def get_report(scan_id: str, db: Session = Depends(get_db)):
+    scan = repository.get_scan(db, scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found")
+
+    try:
+        report_path = generate_report(scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return FileResponse(
+        path=report_path,
+        media_type="application/pdf",
+        filename=f"shieldlabs_report_{scan_id}.pdf",
+    )
 
 
 router.include_router(legacy_scans_router)

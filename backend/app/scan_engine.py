@@ -1,5 +1,5 @@
 """End-to-end scanning pipelines."""
-
+import os
 import json
 import logging
 
@@ -15,6 +15,7 @@ from app.scanners.semantic_analyzer import filter_findings_with_llm
 from app.utils.repo_handler import cleanup_temp_repo, download_github_repo, get_all_code_files
 from app.agents.severity_reasoning import SeverityReasoningAgent
 from app.agents.cross_domain_analyzer import CrossDomainAnalysisAgent
+from app.utils.pdf_generator_html import generate_pdf_report_html
 
 # Instantiated once at module load — CrewAI Agent construction has
 # overhead, no need to rebuild per scan.
@@ -287,6 +288,79 @@ def analyze_cross_domain(code_scan_id: str, web_scan_id: str) -> dict:
     finally:
         db.close()
         
+
+def generate_report(scan_id: str, force: bool = False) -> str:
+    """
+    Generates (or returns the existing) PDF report for a completed scan.
+
+    Pulls the scan's findings and any attack chains, builds the PDF via
+    the HTML/Jinja2 generator, and saves the resulting path onto the
+    Scan record so repeat requests don't regenerate unnecessarily.
+
+    Args:
+        scan_id: the scan to report on
+        force: if True, regenerates even if a report_path already exists
+               and the file is still present on disk
+
+    Returns:
+        Absolute file path of the PDF.
+    """
+    init_db()
+    db = SessionLocal()
+    try:
+        scan_orm = repository.get_scan(db, scan_id)
+        if not scan_orm:
+            raise ValueError("Scan not found: " + str(scan_id))
+
+        if not force and scan_orm.report_path and os.path.exists(scan_orm.report_path):
+            logger.info("Reusing existing report for %s: %s", scan_id, scan_orm.report_path)
+            return scan_orm.report_path
+
+        findings_orm = repository.get_findings_by_scan(db, scan_id)
+        findings = [
+            {
+                "finding_id": f.finding_id,
+                "vuln_type": f.vuln_type,
+                "severity": f.severity,
+                "file": f.file_path,
+                "line": f.line_number,
+                "url": f.url,
+                "code": f.vulnerable_code,
+                "fix": f.fixed_code,
+                "cvss_score": f.cvss_score,
+                "cvss_vector": f.cvss_vector,
+                "agent_review_notes": f.agent_review_notes,
+                "business_impact": f.business_impact,
+            }
+            for f in findings_orm
+        ]
+
+        chains_orm = repository.get_attack_chains_by_scan(db, scan_id)
+        chains = [
+            {
+                "severity": c.severity,
+                "time_to_exploit": c.time_to_exploit,
+                "description": c.description,
+                "impact": c.impact,
+            }
+            for c in chains_orm
+        ]
+
+        scan_dict = {
+            "scan_id": scan_orm.scan_id,
+            "target": scan_orm.target,
+            "scan_type": scan_orm.scan_type,
+        }
+
+        report_path = generate_pdf_report_html(scan_dict, findings, chains)
+        repository.update_scan_report_path(db, scan_id, report_path)
+
+        logger.info("Generated report for scan %s: %s", scan_id, report_path)
+        return report_path
+    finally:
+        db.close()
+
+
 def format_scan_result(db, scan_id: str) -> dict:
     scan = repository.get_scan(db, scan_id)
     findings = repository.get_findings_by_scan(db, scan_id)

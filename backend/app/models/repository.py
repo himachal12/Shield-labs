@@ -142,7 +142,15 @@ def update_scan_status(db: Session, scan_id: int | str, status: str | ScanStatus
     return scan
 
 
-
+def update_scan_report_path(db: Session, scan_id: int | str, report_path: str) -> Optional[Scan]:
+    """Persists the generated PDF report's file path onto the Scan record."""
+    scan = get_scan(db, scan_id)
+    if not scan:
+        return None
+    scan.report_path = report_path
+    db.commit()
+    db.refresh(scan)
+    return scan
 
 
 def add_finding(db: Session, scan_id: int | str, vuln_type: str, severity: str, description: str, file_path: Optional[str] = None, line_number: Optional[int] = None, vulnerable_code: Optional[str] = None, ai_explanation: Optional[str] = None, ai_fix: Optional[str] = None, confidence: float = 1.0, **extra) -> Optional[Finding]:
