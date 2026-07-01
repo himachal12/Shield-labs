@@ -17,6 +17,7 @@ pipeline used for code findings.
 import logging
 
 import requests
+from app.scanners.port_scanner import scan_ports
 
 logger = logging.getLogger("shieldlabs.web_scanner")
 
@@ -145,10 +146,10 @@ def check_exposed_files(target: str) -> list[dict]:
     logger.info("Exposed-file check on %s found %d issue(s).", base_url, len(findings))
     return findings
 
-
 def run_web_recon(target: str) -> list[dict]:
     """
-    Runs all Milestone 1 web checks and combines results.
+    Runs all web recon checks (headers, exposed files, open ports)
+    and combines results.
 
     Args:
         target: domain or URL, e.g. "example.com" or "https://example.com"
@@ -157,8 +158,13 @@ def run_web_recon(target: str) -> list[dict]:
         Combined list of finding dicts from all checks.
     """
     logger.info("Starting web recon for %s", target)
+
+    # scan_ports needs a bare hostname, not a URL with scheme/path
+    host = target.replace("https://", "").replace("http://", "").split("/")[0]
+
     findings = []
     findings.extend(check_security_headers(target))
     findings.extend(check_exposed_files(target))
+    findings.extend(scan_ports(host))
     logger.info("Web recon complete for %s: %d total finding(s).", target, len(findings))
     return findings

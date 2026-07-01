@@ -66,11 +66,15 @@ def scan_ports(target: str, ports: str = COMMON_PORTS) -> list[dict]:
             "reason": "Nmap could not scan " + target + ": " + str(exc),
         }]
 
-    if target not in scanner.all_hosts():
+    hosts_found = scanner.all_hosts()
+    if not hosts_found:
         logger.warning("Host %s did not respond to scan.", target)
         return []
 
-    host_info = scanner[target]
+    # python-nmap keys results by IP, not the original hostname passed in,
+    # so we use whatever host key nmap actually returned.
+    host_key = hosts_found[0]
+    host_info = scanner[host_key]
 
     for proto in host_info.all_protocols():
         ports_found = host_info[proto].keys()
