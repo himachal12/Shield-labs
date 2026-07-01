@@ -67,7 +67,8 @@ def _normalize_url(target: str) -> str:
 def check_security_headers(target: str) -> list[dict]:
     """
     Fetches the target's headers once and reports any missing
-    security-relevant headers.
+    security-relevant headers. Tries https first, falls back to
+    http if the target doesn't serve TLS.
 
     Returns:
         list of finding dicts (one per missing header)
@@ -77,16 +78,22 @@ def check_security_headers(target: str) -> list[dict]:
 
     try:
         response = requests.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-    except requests.RequestException as exc:
-        logger.warning("Could not reach %s for header check: %s", url, exc)
-        return [{
-            "vuln_type": "Unreachable Target",
-            "url": url,
-            "line": None,
-            "confidence": 1.0,
-            "reason": "Could not connect to " + url + ": " + str(exc),
-        }]
-
+    except requests.RequestException:
+        # https failed — try plain http before giving up entirely
+        fallback_url = url.replace("https://", "http://")
+        try:
+            response = requests.get(fallback_url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            url = fallback_url
+        except requests.RequestException as exc:
+            logger.warning("Could not reach %s for header check: %s", fallback_url, exc)
+            return [{
+                "vuln_type": "Unreachable Target",
+                "url": fallback_url,
+                "line": None,
+                "confidence": 1.0,
+                "reason": "Could not connect to " + fallback_url + ": " + str(exc),
+            }]
+        
     present_headers = {h.lower() for h in response.headers.keys()}
 
     for header_name, meta in SECURITY_HEADERS.items():
