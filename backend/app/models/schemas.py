@@ -45,7 +45,6 @@ class WebScanRequest(BaseModel):
     deep_scan: bool = False
     sqli_scan: bool = False
 
-
 class AnalyzeRequest(BaseModel):
     scan_id: str
 
