@@ -16,6 +16,7 @@ from app.utils.repo_handler import cleanup_temp_repo, download_github_repo, get_
 from app.agents.severity_reasoning import SeverityReasoningAgent
 from app.agents.cross_domain_analyzer import CrossDomainAnalysisAgent
 from app.utils.pdf_generator_html import generate_pdf_report_html
+from app.scanners.nuclei_scanner import run_nuclei_scan
 
 # Instantiated once at module load — CrewAI Agent construction has
 # overhead, no need to rebuild per scan.
@@ -199,7 +200,15 @@ def scan_github_repo(url: str, scan_id: str | None = None) -> dict:
         db.close()
 
 
-def scan_web_domain(domain: str, scan_id: str | None = None) -> dict:
+def scan_web_domain(domain: str, scan_id: str | None = None, deep_scan: bool = False) -> dict:
+    """
+    Runs web reconnaissance (headers, ports, SSL) against a domain.
+
+    If deep_scan=True, also runs a Nuclei scan for misconfigurations,
+    exposures, and known-weakness checks (SSH ciphers, missing
+    headers, etc.). Nuclei adds several minutes to the scan — kept
+    opt-in so a default web scan stays fast, matching prior behavior.
+    """
     init_db()
     db = SessionLocal()
     scan = None
@@ -207,6 +216,16 @@ def scan_web_domain(domain: str, scan_id: str | None = None) -> dict:
         scan = _get_or_create_scan(db, scan_id, domain, "web", domain=domain)
         repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=25, stage="Running web reconnaissance")
         findings = run_web_recon(domain)
+
+        if deep_scan:
+            repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=45, stage="Running Nuclei deep scan")
+            target_url = domain if domain.startswith(("http://", "https://")) else "http://" + domain
+            try:
+                nuclei_findings = run_nuclei_scan(target_url)
+                findings.extend(nuclei_findings)
+            except Exception:
+                logger.exception("Nuclei deep scan failed for %s; continuing with existing findings.", domain)
+
         repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=70, stage="Generating fixes")
         fixed = generate_fixes_for_all(findings)
         _save_pipeline_findings(db, scan, fixed)
@@ -219,7 +238,7 @@ def scan_web_domain(domain: str, scan_id: str | None = None) -> dict:
         raise
     finally:
         db.close()
-
+        
 def analyze_cross_domain(code_scan_id: str, web_scan_id: str) -> dict:
     """
     Pulls findings from an existing code scan and an existing web scan
