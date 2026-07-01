@@ -72,6 +72,10 @@ class Finding(Base):
     vuln_type = Column(String(200), nullable=False, index=True)
     severity = Column(String(50), nullable=False, default=Severity.MEDIUM.value, index=True)
     cvss_score = Column(Float, nullable=True)
+    cvss_vector = Column(String(100), nullable=True)          # NEW — Day 7-8: CVSS 3.1 vector string
+    exploitability = Column(Integer, nullable=True)            # NEW — Day 7-8: LLM-rated 1-10
+    time_to_exploit = Column(String(100), nullable=True)       # NEW — Day 7-8: per-finding estimate
+    business_impact = Column(Text, nullable=True)              # NEW — Day 7-8: real-world consequence
     file_path = Column(String(500), nullable=True)
     line_number = Column(Integer, nullable=True)
     url = Column(String(500), nullable=True)

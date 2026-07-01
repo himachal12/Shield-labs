@@ -1,13 +1,10 @@
 """Repository functions for database access."""
 
 
-
 from datetime import datetime
-
 from typing import Optional
-
+import json
 import uuid
-
 
 
 from sqlalchemy import desc
@@ -16,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 
 
-from app.models.entities import Finding, Scan, ScanStatus
+from app.models.entities import AttackChain, Finding, Scan, ScanStatus
 
 
 
@@ -199,7 +196,42 @@ def add_finding(db: Session, scan_id: int | str, vuln_type: str, severity: str, 
     return finding
 
 
+def make_chain_id() -> str:
+    return f"chain_{uuid.uuid4().hex[:8]}"
 
+
+def add_attack_chain(db: Session, scan_id: int | str, finding_ids: list[str], severity: str, description: str, time_to_exploit: Optional[str] = None, impact: Optional[str] = None) -> Optional[AttackChain]:
+    """
+    Persists a cross-domain attack chain linking multiple findings
+    (potentially from different scans) into one compounded-risk record.
+
+    finding_ids is stored as a JSON-encoded string since SQLite has no
+    native array column type.
+    """
+    scan = get_scan(db, scan_id)
+    if not scan:
+        return None
+
+    chain = AttackChain(
+        chain_id=make_chain_id(),
+        scan_id=scan.scan_id,
+        finding_ids=json.dumps(finding_ids),
+        severity=severity.lower(),
+        description=description,
+        time_to_exploit=time_to_exploit,
+        impact=impact,
+    )
+    db.add(chain)
+    db.commit()
+    db.refresh(chain)
+    return chain
+
+
+def get_attack_chains_by_scan(db: Session, scan_id: int | str) -> list[AttackChain]:
+    scan = get_scan(db, scan_id)
+    if not scan:
+        return []
+    return db.query(AttackChain).filter(AttackChain.scan_id == scan.scan_id).all()
 
 
 def update_finding(db: Session, finding_id: str, **updates) -> Optional[Finding]:

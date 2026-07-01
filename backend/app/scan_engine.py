@@ -12,11 +12,13 @@ from app.scanners.fix_generator import generate_fixes_for_all
 from app.scanners.pattern_detector import scan_file_for_patterns
 from app.scanners.semantic_analyzer import filter_findings_with_llm
 from app.utils.repo_handler import cleanup_temp_repo, download_github_repo, get_all_code_files
+from app.agents.severity_reasoning import SeverityReasoningAgent
 
 # Instantiated once at module load — CrewAI Agent construction has
 # overhead, no need to rebuild per scan.
 _code_parser_agent = CodeParserAgent()
 _fix_review_agent = FixGenerationAgent()
+_severity_agent = SeverityReasoningAgent()
 
 logger = logging.getLogger("shieldlabs.engine")
 
@@ -78,6 +80,28 @@ def _review_fixes_with_agent(db, saved_findings: list, source_findings: list[dic
         except Exception:
             logger.exception("Fix Generation Agent review failed for %s; skipping.", record.finding_id)
 
+def _assess_severity_with_agent(db, saved_findings: list, source_findings: list[dict]) -> None:
+    """
+    Runs SeverityReasoningAgent.assess() for each saved finding and
+    attaches CVSS + exploitability data. Non-blocking: a failure here
+    logs and moves on rather than failing the whole scan.
+    """
+    for record, item in zip(saved_findings, source_findings):
+        try:
+            assessment = _severity_agent.assess(item)
+            repository.update_finding(
+                db,
+                record.finding_id,
+                cvss_score=assessment.get("cvss_score"),
+                cvss_vector=assessment.get("cvss_vector"),
+                exploitability=assessment.get("exploitability"),
+                time_to_exploit=assessment.get("time_to_exploit"),
+                business_impact=assessment.get("business_impact"),
+            )
+        except Exception:
+            logger.exception("Severity Reasoning Agent failed for %s; skipping.", record.finding_id)
+
+
 def scan_local_file(file_path: str, scan_id: str | None = None) -> dict:
     init_db()
     db = SessionLocal()
@@ -105,6 +129,7 @@ def scan_local_file(file_path: str, scan_id: str | None = None) -> dict:
 
         repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=90, stage="Reviewing fixes")
         _review_fixes_with_agent(db, saved, fixed)
+        _assess_severity_with_agent(db, saved, fixed)
 
         repository.update_scan_status(db, scan.scan_id, ScanStatus.COMPLETED.value, progress=100, stage="Completed")
         return format_scan_result(db, scan.scan_id)
@@ -155,6 +180,7 @@ def scan_github_repo(url: str, scan_id: str | None = None) -> dict:
 
         repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=90, stage="Reviewing fixes")
         _review_fixes_with_agent(db, saved, fixed)
+        _assess_severity_with_agent(db, saved, fixed)
 
         repository.update_scan_status(db, scan.scan_id, ScanStatus.COMPLETED.value, progress=100, stage="Completed")
         return format_scan_result(db, scan.scan_id)
@@ -208,6 +234,11 @@ def format_scan_result(db, scan_id: str) -> dict:
                 "unified_diff": finding.unified_diff,
                 "breaking_change_risk": finding.breaking_change_risk,
                 "agent_review_notes": finding.agent_review_notes,
+                "cvss_score": finding.cvss_score,
+                "cvss_vector": finding.cvss_vector,
+                "exploitability": finding.exploitability,
+                "time_to_exploit": finding.time_to_exploit,
+                "business_impact": finding.business_impact,
             }
             for finding in findings
         ],
