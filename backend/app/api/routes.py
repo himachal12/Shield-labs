@@ -115,8 +115,16 @@ def queue_code_scan(request: schemas.CodeScanRequest, background_tasks: Backgrou
 @scan_router.post("/scan/web", response_model=schemas.ScanQueuedResponse, status_code=status.HTTP_201_CREATED)
 def queue_web_scan(request: schemas.WebScanRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     scan = repository.create_scan(db, target=request.domain, scan_type="web", domain=request.domain, status=ScanStatus.QUEUED.value)
-    background_tasks.add_task(scan_web_domain, request.domain, scan.scan_id, request.deep_scan)
-    message = "Web scan queued successfully (deep scan enabled — may take several minutes)" if request.deep_scan else "Web scan queued successfully"
+    background_tasks.add_task(scan_web_domain, request.domain, scan.scan_id, request.deep_scan, request.sqli_scan)
+
+    message = "Web scan queued successfully"
+    if request.deep_scan and request.sqli_scan:
+        message += " (deep scan + SQLi testing enabled — may take 10+ minutes)"
+    elif request.deep_scan:
+        message += " (deep scan enabled — may take several minutes)"
+    elif request.sqli_scan:
+        message += " (SQLi testing enabled — may take a few minutes)"
+
     return schemas.ScanQueuedResponse(scan_id=scan.scan_id, status=scan.status, message=message)
 
 @scan_router.post("/analyze", response_model=schemas.ScanQueuedResponse)

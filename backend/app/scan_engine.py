@@ -17,6 +17,7 @@ from app.agents.severity_reasoning import SeverityReasoningAgent
 from app.agents.cross_domain_analyzer import CrossDomainAnalysisAgent
 from app.utils.pdf_generator_html import generate_pdf_report_html
 from app.scanners.nuclei_scanner import run_nuclei_scan
+from app.scanners.sqlmap_pipeline import run_sqli_deep_scan
 
 # Instantiated once at module load — CrewAI Agent construction has
 # overhead, no need to rebuild per scan.
@@ -200,14 +201,17 @@ def scan_github_repo(url: str, scan_id: str | None = None) -> dict:
         db.close()
 
 
-def scan_web_domain(domain: str, scan_id: str | None = None, deep_scan: bool = False) -> dict:
+def scan_web_domain(domain: str, scan_id: str | None = None, deep_scan: bool = False, sqli_scan: bool = False) -> dict:
     """
     Runs web reconnaissance (headers, ports, SSL) against a domain.
-
     If deep_scan=True, also runs a Nuclei scan for misconfigurations,
     exposures, and known-weakness checks (SSH ciphers, missing
     headers, etc.). Nuclei adds several minutes to the scan — kept
     opt-in so a default web scan stays fast, matching prior behavior.
+    If sqli_scan=True, also crawls the target for candidate injectable
+    parameters and tests each with sqlmap. This actively injects
+    payloads (unlike Nuclei's read-only checks), so it's a separate,
+    independently opt-in flag — never bundled into deep_scan.
     """
     init_db()
     db = SessionLocal()
@@ -216,7 +220,6 @@ def scan_web_domain(domain: str, scan_id: str | None = None, deep_scan: bool = F
         scan = _get_or_create_scan(db, scan_id, domain, "web", domain=domain)
         repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=25, stage="Running web reconnaissance")
         findings = run_web_recon(domain)
-
         if deep_scan:
             repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=45, stage="Running Nuclei deep scan")
             target_url = domain if domain.startswith(("http://", "https://")) else "http://" + domain
@@ -225,7 +228,14 @@ def scan_web_domain(domain: str, scan_id: str | None = None, deep_scan: bool = F
                 findings.extend(nuclei_findings)
             except Exception:
                 logger.exception("Nuclei deep scan failed for %s; continuing with existing findings.", domain)
-
+        if sqli_scan:
+            repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=60, stage="Running SQL injection deep scan")
+            target_url = domain if domain.startswith(("http://", "https://")) else "http://" + domain
+            try:
+                sqli_findings = run_sqli_deep_scan(target_url)
+                findings.extend(sqli_findings)
+            except Exception:
+                logger.exception("SQLi deep scan failed for %s; continuing with existing findings.", domain)
         repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=70, stage="Generating fixes")
         fixed = generate_fixes_for_all(findings)
         _save_pipeline_findings(db, scan, fixed)
