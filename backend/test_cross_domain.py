@@ -1,4 +1,5 @@
-from app.agents.cross_domain_analyzer import CrossDomainAnalysisAgent
+from app.agents.cross_domain_analyzer
+import CrossDomainAnalysisAgent
 
 agent = CrossDomainAnalysisAgent()
 
