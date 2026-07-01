@@ -14,6 +14,11 @@ they can flow through the same semantic_analyzer / fix_generator
 pipeline used for code findings.
 """
 
+import socket
+import ssl
+from datetime import datetime, timezone
+import time
+
 import logging
 
 import requests
@@ -22,6 +27,7 @@ from app.scanners.port_scanner import scan_ports
 logger = logging.getLogger("shieldlabs.web_scanner")
 
 REQUEST_TIMEOUT = 8
+REQUEST_DELAY = 0.5  # seconds between requests, to avoid hammering the target
 
 SECURITY_HEADERS = {
     "Strict-Transport-Security": {
@@ -138,7 +144,9 @@ def check_exposed_files(target: str) -> list[dict]:
         try:
             response = requests.get(full_url, timeout=REQUEST_TIMEOUT, allow_redirects=False)
         except requests.RequestException:
+            time.sleep(REQUEST_DELAY)
             continue
+        time.sleep(REQUEST_DELAY)
 
         if response.status_code == 200 and len(response.content) > 0:
             findings.append({
@@ -152,6 +160,116 @@ def check_exposed_files(target: str) -> list[dict]:
 
     logger.info("Exposed-file check on %s found %d issue(s).", base_url, len(findings))
     return findings
+
+COMMON_SUBDOMAINS = ["www", "api", "admin", "dev", "staging", "test", "mail", "ftp", "vpn", "portal"]
+
+
+def enumerate_subdomains(target: str) -> list[dict]:
+    """
+    Checks a fixed list of common subdomain prefixes to see which
+    resolve and respond. Not exhaustive (that needs DNS brute-forcing
+    tools like amass/subfinder) but catches obvious exposed subdomains
+    fast without extra dependencies.
+
+    Returns:
+        list of finding dicts (one per subdomain found alive)
+    """
+    root_domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+    findings = []
+
+    for prefix in COMMON_SUBDOMAINS:
+        subdomain = prefix + "." + root_domain
+        url = "https://" + subdomain
+        try:
+            response = requests.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            if response.status_code < 500:
+                findings.append({
+                    "vuln_type": "Subdomain Discovered: " + subdomain,
+                    "url": url,
+                    "line": None,
+                    "confidence": 0.7,
+                    "reason": "Subdomain " + subdomain + " is live and responding. Verify it should be publicly accessible and is not an unpatched/forgotten environment (e.g. staging, dev, admin).",
+                    "severity_hint": "medium" if prefix in ("admin", "dev", "staging", "test") else "low",
+                })
+        except requests.RequestException:
+            pass
+        time.sleep(REQUEST_DELAY)
+
+    logger.info("Subdomain enum on %s found %d live subdomain(s).", root_domain, len(findings))
+    return findings
+
+def check_ssl_tls(target: str) -> list[dict]:
+    """
+    Connects on port 443 and inspects the certificate for expiration
+    and the negotiated protocol for weak/outdated TLS versions.
+
+    Returns:
+        list of finding dicts (empty if the site doesn't serve HTTPS,
+        or if everything checks out fine)
+    """
+    hostname = target.replace("https://", "").replace("http://", "").split("/")[0]
+    findings = []
+
+    context = ssl.create_default_context()
+
+    try:
+        with socket.create_connection((hostname, 443), timeout=REQUEST_TIMEOUT) as sock:
+            with context.wrap_socket(sock, server_hostname=hostname) as tls_sock:
+                cert = tls_sock.getpeercert()
+                protocol = tls_sock.version()
+    except (socket.timeout, socket.gaierror, ConnectionRefusedError, OSError):
+        logger.info("%s does not serve HTTPS on port 443; skipping SSL/TLS check.", hostname)
+        return []
+    except ssl.SSLError as exc:
+        findings.append({
+            "vuln_type": "SSL/TLS Configuration Error",
+            "url": hostname,
+            "line": None,
+            "confidence": 0.9,
+            "reason": "SSL/TLS handshake failed: " + str(exc) + ". This may indicate an expired, self-signed, or misconfigured certificate.",
+            "severity_hint": "high",
+        })
+        return findings
+
+    if protocol in ("TLSv1", "TLSv1.1", "SSLv3", "SSLv2"):
+        findings.append({
+            "vuln_type": "Weak TLS Protocol Version",
+            "url": hostname,
+            "line": None,
+            "confidence": 0.9,
+            "reason": "Server negotiated " + protocol + ", which is deprecated and vulnerable to known attacks. Should require TLS 1.2 or higher.",
+            "severity_hint": "high",
+        })
+
+    not_after = cert.get("notAfter")
+    if not_after:
+        try:
+            expiry = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+            days_remaining = (expiry - datetime.now(timezone.utc)).days
+            if days_remaining < 0:
+                findings.append({
+                    "vuln_type": "Expired SSL Certificate",
+                    "url": hostname,
+                    "line": None,
+                    "confidence": 1.0,
+                    "reason": "SSL certificate expired " + str(abs(days_remaining)) + " day(s) ago. Browsers will show security warnings to users.",
+                    "severity_hint": "critical",
+                })
+            elif days_remaining < 30:
+                findings.append({
+                    "vuln_type": "SSL Certificate Expiring Soon",
+                    "url": hostname,
+                    "line": None,
+                    "confidence": 0.9,
+                    "reason": "SSL certificate expires in " + str(days_remaining) + " day(s). Renew before it lapses to avoid an outage.",
+                    "severity_hint": "medium",
+                })
+        except ValueError:
+            logger.warning("Could not parse certificate expiry date: %s", not_after)
+
+    logger.info("SSL/TLS check on %s found %d issue(s).", hostname, len(findings))
+    return findings
+
 
 def run_web_recon(target: str) -> list[dict]:
     """
@@ -172,6 +290,8 @@ def run_web_recon(target: str) -> list[dict]:
     findings = []
     findings.extend(check_security_headers(target))
     findings.extend(check_exposed_files(target))
+    findings.extend(enumerate_subdomains(target))
+    findings.extend(check_ssl_tls(target))
     findings.extend(scan_ports(host))
     logger.info("Web recon complete for %s: %d total finding(s).", target, len(findings))
     return findings
