@@ -177,7 +177,18 @@ def format_scan_result(db, scan_id: str) -> dict:
     return {
         "scan": {"id": scan.id, "scan_id": scan.scan_id, "target": scan.target, "status": scan.status, "total_findings": scan.total_findings},
         "findings": [
-            {"finding_id": finding.finding_id, "vuln_type": finding.vuln_type, "severity": finding.severity, "file": finding.file_path, "line": finding.line_number, "code": finding.vulnerable_code, "fix": finding.fixed_code}
+            {
+                "finding_id": finding.finding_id,
+                "vuln_type": finding.vuln_type,
+                "severity": finding.severity,
+                "file": finding.file_path,
+                "line": finding.line_number,
+                "code": finding.vulnerable_code,
+                "fix": finding.fixed_code,
+                "unified_diff": finding.unified_diff,
+                "breaking_change_risk": finding.breaking_change_risk,
+                "agent_review_notes": finding.agent_review_notes,
+            }
             for finding in findings
         ],
     }
