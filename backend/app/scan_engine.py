@@ -2,6 +2,8 @@
 
 import logging
 
+from app.agents.code_parser import CodeParserAgent
+from app.agents.fix_generation import FixGenerationAgent
 from app.models import repository
 from app.models.database import SessionLocal, init_db
 from app.models.entities import ScanStatus
@@ -10,6 +12,11 @@ from app.scanners.fix_generator import generate_fixes_for_all
 from app.scanners.pattern_detector import scan_file_for_patterns
 from app.scanners.semantic_analyzer import filter_findings_with_llm
 from app.utils.repo_handler import cleanup_temp_repo, download_github_repo, get_all_code_files
+
+# Instantiated once at module load — CrewAI Agent construction has
+# overhead, no need to rebuild per scan.
+_code_parser_agent = CodeParserAgent()
+_fix_review_agent = FixGenerationAgent()
 
 logger = logging.getLogger("shieldlabs.engine")
 
@@ -32,9 +39,10 @@ def _get_or_create_scan(db, scan_id: str | None, target: str, scan_type: str, **
     return repository.create_scan(db, target=target, scan_type=scan_type, **extra)
 
 
-def _save_pipeline_findings(db, scan, findings: list[dict]) -> None:
+def _save_pipeline_findings(db, scan, findings: list[dict]) -> list:
+    saved = []
     for item in findings:
-        repository.add_finding(
+        record = repository.add_finding(
             db=db,
             scan_id=scan.scan_id,
             vuln_type=item.get("vuln_type", "Unknown"),
@@ -49,7 +57,26 @@ def _save_pipeline_findings(db, scan, findings: list[dict]) -> None:
             unified_diff=item.get("unified_diff"),
             breaking_change_risk=item.get("breaking_change_risk"),
         )
+        if record:
+            saved.append(record)
+    return saved
 
+
+def _review_fixes_with_agent(db, saved_findings: list, source_findings: list[dict]) -> None:
+    """
+    Runs FixGenerationAgent.review_fix() as a real CrewAI task for
+    each finding that has a fix, and attaches the verdict to the
+    already-saved Finding record. Non-blocking: a failure here logs
+    and moves on rather than failing the whole scan.
+    """
+    for record, item in zip(saved_findings, source_findings):
+        if not item.get("fixed_code"):
+            continue
+        try:
+            verdict = _fix_review_agent.review_fix(item)
+            repository.update_finding(db, record.finding_id, agent_review_notes=verdict)
+        except Exception:
+            logger.exception("Fix Generation Agent review failed for %s; skipping.", record.finding_id)
 
 def scan_local_file(file_path: str, scan_id: str | None = None) -> dict:
     init_db()
@@ -58,12 +85,27 @@ def scan_local_file(file_path: str, scan_id: str | None = None) -> dict:
     try:
         scan = _get_or_create_scan(db, scan_id, file_path, "code")
         repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=10, stage="Scanning local file")
+
         with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
             source = handle.read()
+
+        # CrewAI structural pass — informational, non-blocking. If the
+        # agent/LLM has issues, we log and continue with detection
+        # rather than failing the whole scan over a context step.
+        try:
+            structural_summary = _code_parser_agent.analyze(file_path, source)
+            logger.info("Code Parser Agent summary for %s:\n%s", file_path, structural_summary)
+        except Exception:
+            logger.exception("Code Parser Agent failed for %s; continuing without it.", file_path)
+
         findings = scan_file_for_patterns(file_path, source)
         reviewed = filter_findings_with_llm(findings)
         fixed = generate_fixes_for_all(reviewed)
-        _save_pipeline_findings(db, scan, fixed)
+        saved = _save_pipeline_findings(db, scan, fixed)
+
+        repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=90, stage="Reviewing fixes")
+        _review_fixes_with_agent(db, saved, fixed)
+
         repository.update_scan_status(db, scan.scan_id, ScanStatus.COMPLETED.value, progress=100, stage="Completed")
         return format_scan_result(db, scan.scan_id)
     except Exception as exc:
@@ -73,7 +115,6 @@ def scan_local_file(file_path: str, scan_id: str | None = None) -> dict:
         raise
     finally:
         db.close()
-
 
 def scan_github_repo(url: str, scan_id: str | None = None) -> dict:
     init_db()

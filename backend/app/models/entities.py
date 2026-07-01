@@ -82,6 +82,7 @@ class Finding(Base):
     fix_explanation = Column(Text, nullable=True)
     unified_diff = Column(Text, nullable=True)              # NEW — Day 5: before/after patch view
     breaking_change_risk = Column(String(20), nullable=True) # NEW — Day 5: "Low" / "Medium" / "High"
+    agent_review_notes = Column(Text, nullable=True)  # NEW — Day 7: CrewAI FixGenerationAgent's second-opinion review
     remediation_time = Column(String(100), nullable=True)
     confidence = Column(Float, default=1.0)
     is_false_positive = Column(Boolean, default=False)
