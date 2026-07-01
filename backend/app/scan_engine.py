@@ -128,14 +128,34 @@ def scan_github_repo(url: str, scan_id: str | None = None) -> dict:
         files = get_all_code_files(repo_path)
         scan.total_files = len(files)
         db.commit()
+
+        # Cap agent-based structural analysis to avoid excessive LLM
+        # calls on large repos — every file still gets pattern-detected,
+        # only the CrewAI narrative summary is capped.
+        MAX_STRUCTURAL_ANALYSIS_FILES = 10
+
         all_findings = []
-        for file_path in files:
+        for index, file_path in enumerate(files):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
-                all_findings.extend(scan_file_for_patterns(file_path, handle.read()))
+                source = handle.read()
+
+            if index < MAX_STRUCTURAL_ANALYSIS_FILES:
+                try:
+                    summary = _code_parser_agent.analyze(file_path, source)
+                    logger.info("Code Parser Agent summary for %s:\n%s", file_path, summary)
+                except Exception:
+                    logger.exception("Code Parser Agent failed for %s; continuing without it.", file_path)
+
+            all_findings.extend(scan_file_for_patterns(file_path, source))
+
         repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=55, stage="Reviewing findings")
         reviewed = filter_findings_with_llm(all_findings)
         fixed = generate_fixes_for_all(reviewed)
-        _save_pipeline_findings(db, scan, fixed)
+        saved = _save_pipeline_findings(db, scan, fixed)
+
+        repository.update_scan_status(db, scan.scan_id, ScanStatus.RUNNING.value, progress=90, stage="Reviewing fixes")
+        _review_fixes_with_agent(db, saved, fixed)
+
         repository.update_scan_status(db, scan.scan_id, ScanStatus.COMPLETED.value, progress=100, stage="Completed")
         return format_scan_result(db, scan.scan_id)
     except Exception as exc:
