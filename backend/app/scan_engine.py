@@ -1,5 +1,6 @@
 """End-to-end scanning pipelines."""
 
+import json
 import logging
 
 from app.agents.code_parser import CodeParserAgent
@@ -13,11 +14,13 @@ from app.scanners.pattern_detector import scan_file_for_patterns
 from app.scanners.semantic_analyzer import filter_findings_with_llm
 from app.utils.repo_handler import cleanup_temp_repo, download_github_repo, get_all_code_files
 from app.agents.severity_reasoning import SeverityReasoningAgent
+from app.agents.cross_domain_analyzer import CrossDomainAnalysisAgent
 
 # Instantiated once at module load — CrewAI Agent construction has
 # overhead, no need to rebuild per scan.
 _code_parser_agent = CodeParserAgent()
 _fix_review_agent = FixGenerationAgent()
+_cross_domain_agent = CrossDomainAnalysisAgent()
 _severity_agent = SeverityReasoningAgent()
 
 logger = logging.getLogger("shieldlabs.engine")
@@ -216,7 +219,74 @@ def scan_web_domain(domain: str, scan_id: str | None = None) -> dict:
     finally:
         db.close()
 
+def analyze_cross_domain(code_scan_id: str, web_scan_id: str) -> dict:
+    """
+    Pulls findings from an existing code scan and an existing web scan
+    (both already completed) and runs the Cross-Domain Analysis Agent
+    to identify compounded-risk attack chains between them.
 
+    Saves any chains found under the code scan's record (see the
+    design note in repository.add_attack_chain — chains are stored
+    against a single scan_id even though they span two scans), and
+    marks the underlying findings as is_cross_domain=True.
+
+    Returns:
+        dict with the two source scan_ids and the list of chains found.
+    """
+    init_db()
+    db = SessionLocal()
+    try:
+        code_findings_orm = repository.get_findings_by_scan(db, code_scan_id)
+        web_findings_orm = repository.get_findings_by_scan(db, web_scan_id)
+
+        code_findings = [
+            {"finding_id": f.finding_id, "vuln_type": f.vuln_type, "description": f.description}
+            for f in code_findings_orm
+        ]
+        web_findings = [
+            {"finding_id": f.finding_id, "vuln_type": f.vuln_type, "description": f.description}
+            for f in web_findings_orm
+        ]
+
+        chains = _cross_domain_agent.identify_chains(code_findings, web_findings)
+
+        saved_chains = []
+        for chain in chains:
+            record = repository.add_attack_chain(
+                db=db,
+                scan_id=code_scan_id,
+                finding_ids=chain.get("finding_ids", []),
+                severity=chain.get("severity", "medium"),
+                description=chain.get("description", ""),
+                time_to_exploit=chain.get("time_to_exploit"),
+                impact=chain.get("impact"),
+            )
+            if record:
+                saved_chains.append(record)
+                for finding_id in chain.get("finding_ids", []):
+                    repository.update_finding(db, finding_id, is_cross_domain=True, attack_chain_id=record.chain_id)
+
+        logger.info("Cross-domain analysis (%s + %s): %d chain(s) found.", code_scan_id, web_scan_id, len(saved_chains))
+
+        return {
+            "code_scan_id": code_scan_id,
+            "web_scan_id": web_scan_id,
+            "chains_found": len(saved_chains),
+            "chains": [
+                {
+                    "chain_id": c.chain_id,
+                    "finding_ids": json.loads(c.finding_ids),
+                    "severity": c.severity,
+                    "description": c.description,
+                    "time_to_exploit": c.time_to_exploit,
+                    "impact": c.impact,
+                }
+                for c in saved_chains
+            ],
+        }
+    finally:
+        db.close()
+        
 def format_scan_result(db, scan_id: str) -> dict:
     scan = repository.get_scan(db, scan_id)
     findings = repository.get_findings_by_scan(db, scan_id)
